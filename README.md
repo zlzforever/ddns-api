@@ -3,9 +3,13 @@
 
 ## 部署 
 
+### docker
+
 ``` 
-docker run --name ddns-api -d -v [config]:/app/appsettings.json zlzforever/ddns-api
+docker run --name ddns-api -d -v [config path]:/app/appsettings.json zlzforever/ddns-api
 ```
+
+### docker compose
 
 ```
 version: "3.3"
@@ -20,7 +24,10 @@ services:
       - "9031:80"
 ```
 
+## 配置文件
+
 appsettings.json
+
 ```
 {
   "AllowedHosts": "*",
