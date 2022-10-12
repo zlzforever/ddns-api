@@ -17,34 +17,25 @@ public class AliyunDnsProvider : IDnsProvider
 
     public List<Record> GetList(DomainConfig config, string type, string domain)
     {
-        try
+        var client = CreateClient(config);
+        // Create the request
+        var request = new DescribeSubDomainRecordsRequest
         {
-            var client = CreateClient(config);
-            // Create the request
-            var request = new DescribeSubDomainRecordsRequest
-            {
-                SubDomain = domain,
-                Type = "A"
-            };
-            // Initiate the request and get the response
-            var response = client.GetAcsResponse(request);
-            if (response.DomainRecords == null)
-            {
-                return new List<Record>();
-            }
+            SubDomain = domain,
+            Type = "A"
+        };
+        // Initiate the request and get the response
+        var response = client.GetAcsResponse(request);
+        if (response.DomainRecords == null)
+        {
+            return new List<Record>();
+        }
 
-            return response.DomainRecords.Select(x => new Record
-            {
-                Id = x.RecordId,
-                Value = x._Value,
-            }).ToList();
-        }
-        catch (Exception e)
+        return response.DomainRecords.Select(x => new Record
         {
-            _logger.LogInformation(
-                $"get domain record list failed: {e.Message}");
-            return null;
-        }
+            Id = x.RecordId,
+            Value = x._Value,
+        }).ToList();
     }
 
     public bool AddRecord(DomainConfig config, long priority, long ttl, string type, string value, string rr,
@@ -62,19 +53,7 @@ public class AliyunDnsProvider : IDnsProvider
             DomainName = domainName
         };
         var response = client.DoAction(addDomainRecordRequest);
-        if (response.isSuccess())
-        {
-            _logger.LogInformation(
-                $"add domain record {rr}.{domainName} {value} success");
-            return true;
-        }
-        else
-        {
-            _logger.LogError(
-                $"add domain record {rr}.{domainName} {value} failed: {Encoding.UTF8.GetString(response.Content)}");
-
-            return false;
-        }
+        return response.isSuccess();
     }
 
     public bool UpdateRecord(DomainConfig config, long priority, long ttl, string type, string value, string rr,
@@ -92,18 +71,7 @@ public class AliyunDnsProvider : IDnsProvider
             RecordId = recordId
         };
         var response = client.DoAction(updateDomainRecordRequest);
-        if (response.isSuccess())
-        {
-            _logger.LogInformation(
-                $"update domain record {rr} {value} success");
-            return true;
-        }
-        else
-        {
-            _logger.LogError(
-                $"update domain record {rr} {value} failed: {Encoding.UTF8.GetString(response.Content)}");
-            return false;
-        }
+        return response.isSuccess();
     }
 
     private DefaultAcsClient CreateClient(DomainConfig config)

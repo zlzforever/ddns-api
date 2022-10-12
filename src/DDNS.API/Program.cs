@@ -3,6 +3,7 @@ using DDns.API;
 using DDns.API.Providers;
 using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
 using Serilog;
 using Serilog.Events;
 
@@ -23,6 +24,7 @@ builder.Host.ConfigureServices((context, services) =>
     services.AddHttpContextAccessor();
     services.AddHttpClient();
     services.AddSingleton<DnsProviderFactory>();
+    services.AddMemoryCache();
 
     var serilogSection = context.Configuration.GetSection("Serilog");
     if (serilogSection.GetChildren().Any())
@@ -53,7 +55,7 @@ builder.Host.ConfigureServices((context, services) =>
 var app = builder.Build();
 
 app.MapGet("/domains/{domain}",
-    ([FromRoute, Required, StringLength(100)] string domain, [FromQuery, Required, StringLength(32)] string token,
+    async ([FromRoute, Required, StringLength(100)] string domain, [FromQuery, Required, StringLength(32)] string token,
         [FromServices] IHttpContextAccessor httpContextAccessor) =>
     {
         var context = httpContextAccessor.HttpContext;
@@ -63,91 +65,97 @@ app.MapGet("/domains/{domain}",
             return;
         }
 
-        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("DDNS");
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("DDns.API");
 
-        var ip = GetIp(context).Result;
+        var ip = await GetIp(context);
 
         if (string.IsNullOrWhiteSpace(ip))
         {
-            Log.Logger.Error("IP is not know");
-            context.Response.StatusCode = 400;
+            context.Response.StatusCode = 500;
+            Log.Logger.Error("IP is null or empty");
             return;
         }
 
-        var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
+        var displayUrl = context.Request.GetDisplayUrl();
 
         if (string.IsNullOrWhiteSpace(token))
         {
-            logger.LogError($"{context.Request.GetDisplayUrl()} is missing access token");
             context.Response.StatusCode = 403;
+            logger.LogError($"{displayUrl}, access token not found");
             return;
         }
 
         if (string.IsNullOrWhiteSpace(domain))
         {
-            logger.LogError($"{context.Request.GetDisplayUrl()} is missing domain");
             context.Response.StatusCode = 400;
+            logger.LogError($"{displayUrl}, domain token not found");
             return;
         }
 
-        var tuple = SplitDomainStr(domain);
+        var tuple = SplitDomain(domain);
         if (tuple == default || string.IsNullOrWhiteSpace(tuple.RR) || string.IsNullOrWhiteSpace(tuple.Domain))
         {
-            logger.LogError($"{context.Request.GetDisplayUrl()} is invalid");
             context.Response.StatusCode = 400;
+            logger.LogError($"{displayUrl}, domain is invalid");
             return;
         }
 
-        var domainConfig = configuration.GetSection($"Domains:{domain}").Get<DomainConfig>();
+        var domainConfig = GetDomainConfig(context.RequestServices, domain);
+
         if (domainConfig == null)
         {
-            logger.LogError($"{context.Request.GetDisplayUrl()} is missing domain config");
             context.Response.StatusCode = 403;
+            logger.LogError($"{displayUrl}, domain not exists");
             return;
         }
 
         if (string.IsNullOrWhiteSpace(domainConfig.Provider))
         {
-            logger.LogError($"domain {domain} is missing dns provider");
             context.Response.StatusCode = 500;
+            logger.LogError($"{displayUrl}, dns provider not found");
             return;
         }
 
         if (string.IsNullOrWhiteSpace(domainConfig.AccessKey))
         {
-            logger.LogError($"domain {domain} is missing accessKey");
             context.Response.StatusCode = 500;
+            logger.LogError($"{displayUrl}, dns provider access key not found");
             return;
         }
 
         if (string.IsNullOrWhiteSpace(domainConfig.Secret))
         {
-            logger.LogError($"domain {domain} is missing accessKeySecret");
             context.Response.StatusCode = 500;
+            logger.LogError($"{displayUrl}, dns provider access secret key not found");
             return;
         }
 
         if (string.IsNullOrWhiteSpace(domainConfig.AccessToken))
         {
-            logger.LogError($"domain {domain} is missing accessToken");
             context.Response.StatusCode = 500;
+            logger.LogError($"{displayUrl}, domain token not found");
             return;
         }
 
         if (domainConfig.AccessToken != token)
         {
-            logger.LogError("accessToken is invalid");
             context.Response.StatusCode = 403;
+            logger.LogError($"{displayUrl}, access token is invalid");
             return;
         }
 
         var providerFactory = context.RequestServices.GetRequiredService<DnsProviderFactory>();
         var provider = providerFactory.Create(domainConfig.Provider);
 
-        var records = provider.GetList(domainConfig, domain, "A");
-        if (records == null)
+        List<Record> records;
+        try
         {
-            context.Response.StatusCode = 403;
+            records = provider.GetList(domainConfig, domain, "A");
+        }
+        catch (Exception e)
+        {
+            context.Response.StatusCode = 500;
+            logger.LogError($"{displayUrl}, request records failed: {e}");
             return;
         }
 
@@ -156,6 +164,11 @@ app.MapGet("/domains/{domain}",
             if (!provider.AddRecord(domainConfig, 5, 600, "A", ip, tuple.RR, tuple.Domain))
             {
                 context.Response.StatusCode = 500;
+                logger.LogError($"{displayUrl}, add record failed");
+            }
+            else
+            {
+                logger.LogInformation($"{displayUrl}, add record success");
             }
         }
         else
@@ -166,17 +179,34 @@ app.MapGet("/domains/{domain}",
                 if (!provider.UpdateRecord(domainConfig, 5, 600, "A", ip, tuple.RR, record.Id))
                 {
                     context.Response.StatusCode = 500;
+                    logger.LogError($"{displayUrl}, update record failed");
+                }
+                else
+                {
+                    logger.LogInformation($"{displayUrl}, update record success");
                 }
             }
             else
             {
-                logger.LogInformation(
-                    $"domain record {domain} {ip} is no change");
+                logger.LogInformation($"{displayUrl}, there is nothing to change");
             }
         }
     });
 
 app.Run();
+
+static DomainConfig GetDomainConfig(IServiceProvider services, string domain)
+{
+    var memoryCache = services.GetRequiredService<IMemoryCache>();
+    return memoryCache.GetOrCreate($"DOMAIN_{domain}", (entry =>
+    {
+        var configuration = services.GetRequiredService<IConfiguration>();
+        var domainConfig = configuration.GetSection($"Domains:{domain}").Get<DomainConfig>();
+        entry.SetValue(domainConfig);
+        entry.SetSlidingExpiration(TimeSpan.FromMinutes(1));
+        return domainConfig;
+    }));
+}
 
 static async Task<string> GetIp(HttpContext httpContext)
 {
@@ -200,7 +230,7 @@ static async Task<string> GetIp(HttpContext httpContext)
     }
 }
 
-static (string RR, string Domain) SplitDomainStr(string str)
+static (string RR, string Domain) SplitDomain(string str)
 {
     var pieces = str.Split(".");
     if (pieces.Length < 3)
