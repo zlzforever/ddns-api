@@ -32,10 +32,15 @@ appsettings.json
 {
   "AllowedHosts": "*",
   "Domains": {
+    -- which domain support
     "test.yourdomain.com": {
+      -- dns provider
       "Provider": "aliyun",
+      -- dns provider access key
       "AccessKey": "",
+      -- dns provider access secret
       "Secret": "",
+      -- ddns api token
       "AccessToken": ""
     }
   },
@@ -87,4 +92,18 @@ appsettings.json
     }
   }
 }
+```
+
+## 更新
+
+比如在 linux 系统中
+
+```
+crontab -e
+```
+然后输入
+
+```
+*/5 * * * * curl https://ddns.xxx.com/domains/api.xxx.com?token=XXXXX
+
 ```
